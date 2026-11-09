@@ -71,6 +71,66 @@ END { exit !found }
 	return 1
 }
 
+# Duck liveness gate. Apart from the TCP protocol probe above, Duck
+# compares init.svc.adbd=stopped with two adbd surfaces an app can see
+# (AdbRuntimeFindings, INIT_STOPPED_WITH_ADB_INIT_SOCKET and
+# INIT_STOPPED_WITH_ADB_JDWP_SOCKET):
+# - /dev/socket/adbd: init creates it when adbd starts and unlinks it
+#   before it publishes stopped. stat() from an app gets EACCES on the
+#   inode, which Duck reads as present.
+# - @jdwp-control: adbd binds this abstract socket itself, and an app
+#   can connect() to it.
+# resetprop cannot hide either one, so while adbd runs the prop must
+# read running. A USB-only phone has no TCP listener, so the TCP check
+# alone never caught this.
+adbd_alive() {
+	pidof adbd >/dev/null 2>&1 && return 0
+	[ -e /dev/socket/adbd ] && return 0
+	grep -q '@jdwp-control$' /proc/net/unix 2>/dev/null && return 0
+	adb_listener_present
+}
+
+# Socket hiding through the susfs LKM (ymuuuu/susfs4ksu-for-lkm with the
+# sus_unix layer). Both adbd surfaces above become invisible to hidden
+# apps, so the liveness gate no longer has to keep init.svc.adbd at
+# running:
+# - /dev/socket/adbd: a sus_path rule. stat() and directory listings
+#   both drop it, but listings only when the kstat layer is armed (it
+#   carries the getdents64 filter), so /proc/susfs_kstat must exist.
+#   The rule follows the inode, and init makes a new socket every time
+#   adbd starts, so the rule is replaced when the inode changed.
+# - @jdwp-control: a sus_unix rule, connect() answers ECONNREFUSED.
+# Returns 0 only when every surface is hidden right now.
+SUS_PATH_NODE=/proc/susfs_path
+SUS_UNIX_NODE=/proc/susfs_unix
+ADBD_SOCKET=/dev/socket/adbd
+JDWP_NAME=jdwp-control
+
+socket_hiding_active() {
+	local INO
+	[ "$HIDE_ADBD_SOCKETS" = 1 ] || return 1
+	[ -w "$SUS_PATH_NODE" ] && [ -w "$SUS_UNIX_NODE" ] || return 1
+	[ -e /proc/susfs_kstat ] || return 1
+	grep -q "^@${JDWP_NAME}\$" "$SUS_UNIX_NODE" || echo "add $JDWP_NAME" > "$SUS_UNIX_NODE"
+	grep -q '^# .* hook=1,' "$SUS_UNIX_NODE" || return 1
+	grep -q "^@${JDWP_NAME}\$" "$SUS_UNIX_NODE" || return 1
+	if [ -e "$ADBD_SOCKET" ]; then
+		INO=$(stat -c %i "$ADBD_SOCKET")
+		if ! grep -q "path=${ADBD_SOCKET} .* ino=${INO} " "$SUS_PATH_NODE"; then
+			echo "del $ADBD_SOCKET" > "$SUS_PATH_NODE" 2>/dev/null
+			echo "add $ADBD_SOCKET" > "$SUS_PATH_NODE" || return 1
+			log_set "$ADBD_SOCKET" "sus_path ino $INO"
+		fi
+	fi
+	return 0
+}
+
+remove_socket_hiding() {
+	[ -w "$SUS_UNIX_NODE" ] && echo "del $JDWP_NAME" > "$SUS_UNIX_NODE" 2>/dev/null
+	[ -w "$SUS_PATH_NODE" ] && echo "del $ADBD_SOCKET" > "$SUS_PATH_NODE" 2>/dev/null
+	return 0
+}
+
 VSOCK_LISTEN_PROP=service.adb.listen_addrs
 VSOCK_LISTEN_ADDRS=vsock:5555
 
@@ -148,17 +208,18 @@ restore_originals() {
 # after boot completed.
 assert_props() {
 	local SPOOF_ALLOWED=1 P
-	if adb_listener_present; then
+	# A TCP listener answers the ADB protocol, which nothing hides, so it
+	# always keeps the truth. A local adbd only does so while its sockets
+	# are visible to apps.
+	if adb_listener_present || { adbd_alive && ! socket_hiding_active; }; then
 		SPOOF_ALLOWED=0
-		# live endpoint, keep truth and undo any stale spoof written
-		# by an earlier pass that ran before the listener existed
+		# adbd is live, keep truth and undo any stale spoof written
+		# by an earlier pass that ran before adbd started
 		if [ "$(prop_get "init.svc.adbd")" = "$VAL_INIT_SVC_ADBD" ]; then
-			# a listen socket is up while the prop reads the spoof
-			# value: init would have written running, restore that
+			# adbd runs while the prop reads the spoof value: init
+			# would have written running, restore that
 			resetprop -n "init.svc.adbd" "running"
-			log_set "init.svc.adbd" "running (listener gate)"
-		else
-			restore_prop_from_saved "init.svc.adbd"
+			log_set "init.svc.adbd" "running (liveness gate)"
 		fi
 		restore_prop_from_saved "init.svc_debug_pid.adbd"
 	fi

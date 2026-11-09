@@ -12,6 +12,7 @@ if [ -f "$PERSISTENT_DIR/watchdog.pid" ]; then
 fi
 
 restore_originals
+remove_socket_hiding
 delete_prop_if_exists "$VSOCK_LISTEN_PROP"
 rm -f "$PERSISTENT_DIR/saved.txt"
 exit 0

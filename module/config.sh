@@ -54,3 +54,12 @@ VSOCK_ONLY_ON_EMULATOR=1
 # source reads clean with no gate needed. This kills the adb session
 # to the device, do not enable while you control the device over adb.
 REAL_DISABLE_ADB=0
+
+# Hide adbd's app-visible sockets through the susfs LKM fork
+# (ymuuuu/susfs4ksu-for-lkm, sus_unix layer): a sus_path rule for
+# /dev/socket/adbd and a sus_unix rule for @jdwp-control. When both
+# are confirmed active the init.svc.adbd spoof applies even while adbd
+# runs. Without that LKM (KSUN's bundled build has no /proc/susfs_unix
+# and no working getdents filter) nothing is added and init.svc.adbd
+# stays truthful as in v1.2.1.
+HIDE_ADBD_SOCKETS=1

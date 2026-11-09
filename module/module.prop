@@ -1,7 +1,7 @@
 id=adb-hide-susfs
 name=ADB Hide (susfs LKM x64)
-version=v1.2.0
-versionCode=5
+version=v1.3.0
+versionCode=7
 author=ymuu (ADB subset ported from BRENE by rrr333nnn333)
-description=Spoofs ADB runtime properties so apps read a clean state while real adbd stays usable. Uses resetprop only. v1.1 adds a live listener gate: init.svc.adbd is spoofed only when no TCP ADB endpoint is in LISTEN state, so wire protocol probes never contradict the spoof. REAL_DISABLE_ADB=1 in config.sh gives full BRENE parity. Watchdog re asserts spoofed props. v1.1.2 defers the USB config prop spoof until boot completed so Android no longer turns USB debugging off for real. v1.2.0: on an emulator, adbd listens on vsock only, so there is no TCP adb listener to probe and the init.svc.adbd spoof applies.
+description=Spoofs ADB runtime properties so apps read a clean state while real adbd stays usable. Uses resetprop only. v1.1 adds a live listener gate: init.svc.adbd is spoofed only when no TCP ADB endpoint is in LISTEN state, so wire protocol probes never contradict the spoof. REAL_DISABLE_ADB=1 in config.sh gives full BRENE parity. Watchdog re asserts spoofed props. v1.1.2 defers the USB config prop spoof until boot completed so Android no longer turns USB debugging off for real. v1.2.0: on an emulator, adbd listens on vsock only, so there is no TCP adb listener to probe and the init.svc.adbd spoof applies. v1.2.1: the init.svc.adbd spoof is skipped whenever adbd is alive (pid, /dev/socket/adbd or @jdwp-control), not only when a TCP listener exists, so Duck sees no socket contradiction on USB phones. v1.3.0: with the susfs LKM fork (sus_unix layer) it hides /dev/socket/adbd and @jdwp-control from apps and then spoofs init.svc.adbd stopped while adbd runs.
 updateJson=

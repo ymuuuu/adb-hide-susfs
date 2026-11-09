@@ -99,9 +99,11 @@ It applies only when /proc/bootconfig has androidboot.qemu = "1" and
 other modules delete that prop at post-fs-data. A real phone's adbd
 uses USB and is not touched.
 
-With no listener, the listener gate lets the init.svc.adbd spoof apply,
-so on the AVD Duck has nothing to contradict it. No adb mDNS
-advertisement was seen on the Android 16 AVD: mdnsd never starts.
+With no TCP listener, Duck has no ADB protocol endpoint to probe. Since
+v1.2.1 the init.svc.adbd spoof still does not apply while adbd runs
+(see the liveness gate below), because /dev/socket/adbd and
+@jdwp-control stay visible over vsock too. No adb mDNS advertisement
+was seen on the Android 16 AVD: mdnsd never starts.
 
 The prop is kept until 10 s after boot completed, not deleted as soon
 as adbd runs. With this module on the AVD, init runs its
@@ -126,22 +128,92 @@ release after v0.8.0) on the same
 AVD: NoEmulator sets the same prop and hides init.svc.adbd from apps
 only, while this module spoofs it for every process.
 
+## Liveness gate (v1.2.1)
+
+Newer Duck builds have two more HIGH findings that compare
+init.svc.adbd=stopped with adbd surfaces an app can see:
+
+- INIT_STOPPED_WITH_ADB_INIT_SOCKET: stat(/dev/socket/adbd) from the app
+  gets EACCES on the inode while a made-up sibling path gets ENOENT, so
+  the socket exists. init unlinks it before it publishes stopped.
+- INIT_STOPPED_WITH_ADB_JDWP_SOCKET: connect() to the abstract socket
+  @jdwp-control, which adbd binds itself, succeeds.
+
+resetprop cannot hide either. The v1.1 gate only looked for a TCP
+listener, which a phone using adb over USB never has, so the spoof
+always applied and Duck reported "2 runtime contradiction(s)" (Pixel 6a,
+Android 15, report duck_detector_report_Pixel_6a_20261109_113207).
+
+adbd_alive in utils.sh now treats adbd as live if any of these holds:
+pidof adbd, /dev/socket/adbd exists, @jdwp-control is in /proc/net/unix,
+or a TCP listener is up. While adbd is live, init.svc.adbd is left at
+(or put back to) running. The spoof only applies when adbd is really
+stopped.
+
+Duck still reports ADB as active (WARNING) while adbd runs: the real
+props, sockets and USB state all say so. Only turning adb off for real
+(USB debugging off, or REAL_DISABLE_ADB=1) gets a clean ADB Runtime
+card.
+
+The prop snapshot in saved.txt is rebuilt at every post-fs-data, so it
+always describes the current boot. It holds the first value seen, at
+post-fs-data, which on a Pixel 6a is init.svc.adbd=stopped and
+sys.usb.config=mtp, because adbd has not started yet.
+
+## Socket hiding (v1.3.0)
+
+The liveness gate keeps init.svc.adbd truthful because apps can see
+adbd's sockets. With the susfs LKM fork
+(https://github.com/ymuuuu/susfs4ksu-for-lkm, branch
+feat/sus-unix-abstract) those sockets can be hidden instead:
+
+- /dev/socket/adbd: a sus_path rule. That build also fixes the
+  syscall-table hooks on kernels without ARM64_BTI_KERNEL, so the
+  getdents64 filter drops the name from listings too.
+- @jdwp-control: a rule in the new sus_unix layer (/proc/susfs_unix).
+  connect() from a hidden app answers ECONNREFUSED, the same as for an
+  unbound abstract name.
+
+Each pass (post-fs-data, service and every watchdog tick)
+socket_hiding_active adds both rules, replaces the sus_path rule when
+adbd restarted (init creates a new socket inode), and returns success
+only when /proc/susfs_unix shows the hook armed and /proc/susfs_kstat
+exists. Then the init.svc.adbd spoof applies even while adbd runs. A
+TCP ADB listener still keeps the truth, since the protocol probe is not
+hidden. KSUN's bundled susfs LKM has neither /proc/susfs_unix nor a
+working getdents filter on such kernels, so with it nothing changes
+from v1.2.1. Set HIDE_ADBD_SOCKETS=0 to turn this off.
+
+Known gap: after adbd restarts, the new socket is visible to apps until
+the next watchdog tick (up to WATCH_INTERVAL_S) replaces the rule.
+
+Measured on a Pixel 6a (Android 15) with the LKM loaded live, HMA-OSS
+with the BroadcastController fix, and init.svc.adbd=stopped: Duck
+Detector's ADB Runtime card reads "ADB state consistent": init socket
+absent, JDWP not observed (connection refused), USB no functions, no
+contradiction.
+
+Setup on KernelSU Next:
+
+    ksud susfs autoload disable      # stop the bundled susfs LKM
+    # flash the fork's susfs_guard_lkm module zip, then:
+    touch /data/adb/modules/susfs_guard_lkm/early_load
+    # reboot
+
 ## Install and verify
 
 Flash adb-hide-susfs-vX.zip in KernelSU Next, reboot, then:
 
-    getprop init.svc.adbd            # expect stopped
-    getprop sys.usb.state            # expect mtp
+    getprop init.svc.adbd            # running while adbd runs, stopped otherwise
     getprop persist.sys.usb.config   # expect mtp
 
 Expected post run verdicts:
 
-- Duck AdbRuntime: no contradiction ever. On phones with ADB transport
-  off all six sources read clean. On emulators the mDNS source keeps a
-  plain WARNING while init.svc.adbd matches the live endpoint.
+- Duck AdbRuntime: no contradiction. While adbd runs, a WARNING that
+  ADB is active. With ADB really off, all sources read clean.
 - vdinfos ADB block: adb settings reads keep the HMA spoof, props now
-  agree (init.svc.adbd stopped matches adb_enabled spoofed 0 on gated
-  devices).
+  agree (init.svc.adbd stopped matches adb_enabled spoofed 0) only while
+  adbd is really stopped.
 - BRENE mode parity: set REAL_DISABLE_ADB=1 to reproduce BRENE's real
   settings toggle. Otherwise real settings are not touched and external
   adb sessions keep working.

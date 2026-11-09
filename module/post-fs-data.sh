@@ -10,6 +10,11 @@ if vsock_mode_active; then
 	set_vsock_only_listen
 fi
 
+# Props start from their real values on every boot, so the snapshot is
+# rebuilt here and only describes this boot. Without the reset,
+# save_originals keeps the first value ever recorded, from whatever
+# boot that was.
+rm -f "$PERSISTENT_DIR/saved.txt"
 save_originals
 assert_props
 
