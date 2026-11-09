@@ -1,0 +1,4 @@
+# third-party upstream clone (BRENE), kept locally for reference
+BRENE/
+# build outputs and third-party test apps; module zips go to GitHub releases
+*.zip
